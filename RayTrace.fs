@@ -36,14 +36,33 @@ struct HitRecord {
     int hitType; 
 };
 
-// 伪随机数发生器：用来生成星空和金属粗糙度
-float hash(vec3 p) {
-    p = fract(p * vec3(443.8975f, 397.2973f, 491.1871f));
-    p += dot(p.xyz, p.yzx + 19.19f);
-    return fract(p.x * p.y * p.z);
+// 基础哈希噪声
+float hash12(vec2 p) {
+    vec3 p3  = fract(vec3(p.xyx) * 0.1031f);
+    p3 += dot(p3, p3.yzx + 33.33f);
+    return fract((p3.x + p3.y) * p3.z);
 }
 
-// 纯数学生成的多球求交大管家
+float noise(vec2 p) {
+    vec2 i = floor(p); 
+    vec2 f = fract(p);
+    vec2 u = f * f * (3.0f - 2.0f * f);
+    return mix(mix(hash12(i + vec2(0.0f, 0.0f)), hash12(i + vec2(1.0f, 0.0f)), u.x),
+               mix(hash12(i + vec2(0.0f, 1.0f)), hash12(i + vec2(1.0f, 1.0f)), u.x), u.y);
+}
+
+float fbm(vec2 p) {
+    float v = 0.0f; 
+    float a = 0.5f;
+    for (int i = 0; i < 3; i++) { 
+        v += a * noise(p); 
+        p *= 2.1f; 
+        a *= 0.5f; 
+    }
+    return v;
+}
+
+// 射线与单球求交
 bool checkSingleSphere(Ray ray, vec3 center, float radius, float tMax, out HitRecord rec) {
     vec3 oc = ray.origin - center;
     float b = dot(oc, ray.direction);
@@ -67,37 +86,87 @@ bool checkSingleSphere(Ray ray, vec3 center, float radius, float tMax, out HitRe
     return true;
 }
 
+// 射线与所有物体求交大管家
 bool hitAllSpheres(Ray ray, float tMax, out HitRecord rec) {
     HitRecord tempRec;
     bool hitAnything = false;
     float closestSoFar = tMax;
 
-    // --- 1 号球 (樱花玻璃) ---
+    // --- 情况 1: 无限水平地面 (定在 Y = -1.8 的高度) ---
+    if (ray.direction.y < -0.001f) {
+        float tFloor = (-1.8f - ray.origin.y) / ray.direction.y;
+        if (tFloor > 0.001f && tFloor < closestSoFar) {
+            hitAnything = true;
+            closestSoFar = tFloor;
+            rec.t = tFloor;
+            rec.p = ray.origin + tFloor * ray.direction;
+            rec.normal = vec3(0.0f, 1.0f, 0.0f);
+            rec.frontFace = true;
+            rec.hitType = 1; 
+        }
+    }
+
+    // --- 情况 2: 1 号球 (樱花玻璃) ---
     if (checkSingleSphere(ray, BALL_A_POS, BALL_A_R, closestSoFar, tempRec)) {
         hitAnything = true;
         closestSoFar = tempRec.t;
         rec = tempRec;
-        rec.hitType = 2; // 确认为 2 号玻璃，且 rec.normal 会在内部自动校准为朝外！
+        rec.hitType = 2; 
     }
 
-    // --- 2 号球 (真·缎面黄金金属) ---
+    // --- 情况 3: 2 号球 (缎面黄金金属) ---
     if (checkSingleSphere(ray, BALL_B_POS, BALL_B_R, closestSoFar, tempRec)) {
         hitAnything = true;
         closestSoFar = tempRec.t;
         rec = tempRec;
-        rec.hitType = 3; // 严格锁定 3 号金属材质！
+        rec.hitType = 3; 
     }
 
-    // --- 3 号球 (翡翠绿塑料) ---
+    // --- 情况 4: 3 号球 (翡翠绿塑料) ---
     if (checkSingleSphere(ray, BALL_C_POS, BALL_C_R, closestSoFar, tempRec)) {
         hitAnything = true;
         closestSoFar = tempRec.t;
         rec = tempRec;
-        rec.hitType = 4; // 严格锁定 4 号塑料材质！
+        rec.hitType = 4; 
     }
 
     return hitAnything;
 }
+
+// ======================== 【新加入的独立阴影魔法函数区】 ========================
+
+// 函数 A：2D高空云彩投影函数（梦子捉虫完美解耦版）
+float getCloudShadow(vec3 hitPoint, vec3 lightDir, float shaderTime) {
+    float cloudHeight = 20.0f;
+    float lightY = max(abs(lightDir.y), 0.15f);
+    
+    // 梦子的物理矢量对齐公式
+    vec3 geoOffset = lightDir * ((cloudHeight - hitPoint.y) / lightY);
+    vec2 shadowUV = (hitPoint.xz + geoOffset.xz) * 0.05f + vec2(shaderTime * 0.1f, 0.0f);
+    
+    float cloudDensity = smoothstep(0.4f, 0.7f, fbm(shadowUV));
+    // 太阳太低时平滑淡出影子，防止地平线拉扯穿帮
+    return mix(1.0f, 0.3f, cloudDensity * smoothstep(0.0f, 0.15f, abs(lightDir.y)));
+}
+
+// 函数 B：3D物体遮挡阴影函数（真正的硬核光追阴影！）
+float getSphereShadow(vec3 hitPoint, vec3 lightDir) {
+    Ray shadowRay;
+    // 稍微沿着法线偏移一点点（0.001f），防止阴影自相交（自阴影麻点）
+    shadowRay.origin = hitPoint + vec3(0.0f, 1.0f, 0.0f) * 0.001f; 
+    shadowRay.direction = lightDir;
+    
+    HitRecord dummyRec;
+    // 往光源方向射出一根光线，只测试那三颗3D球体（忽略地面自身）
+    // 2号球
+    if (checkSingleSphere(shadowRay, BALL_B_POS, BALL_B_R, 1000.0f, dummyRec)) return 0.2f;
+    // 3号球
+    if (checkSingleSphere(shadowRay, BALL_C_POS, BALL_C_R, 1000.0f, dummyRec)) return 0.2f;
+    
+    return 1.0f; // 没被遮挡，完全明亮
+}
+
+// ==============================================================================
 
 float schlickFresnel(float cosine, float refIdx) {
     float r0 = (1.0f - refIdx) / (1.0f + refIdx);
@@ -105,105 +174,108 @@ float schlickFresnel(float cosine, float refIdx) {
     return r0 + (1.0f - r0) * pow(1.0f - cosine, 5.0f);
 }
 
-// 核心色彩追踪魔法
-vec3 rayColor(Ray initialRay) {
+vec3 rayColor(Ray camRay, float shaderTime) {
     vec3 finalColor = vec3(0.0f);
-    vec3 throughput = vec3(1.0f); 
-    Ray currentRay = initialRay;
+    vec3 throughput = vec3(1.0f);
+    Ray currentRay = camRay;
+
+    float daySpeed = shaderTime * 0.001f; 
+    vec3 sunDir = normalize(vec3(cos(daySpeed) * 1.5f, sin(daySpeed) * 1.5f, 0.5f));
+    vec3 moonDir = -sunDir; 
+
+    float isNight = smoothstep(0.1f, -0.1f, sunDir.y); 
+    float isDay   = 1.0f - isNight;
 
     for (int bounce = 0; bounce < 4; ++bounce) {
         HitRecord rec;
-        rec.t = 1e20f;
-        rec.hitType = 0;
-
-        hitAllSpheres(currentRay, rec.t, rec);
-
-        float tPlane = (-2.0f - currentRay.origin.y) / currentRay.direction.y;
-        if (currentRay.direction.y < 0.0f && tPlane > 0.001f && tPlane < rec.t) {
-            rec.t = tPlane;
-            rec.p = currentRay.origin + tPlane * currentRay.direction;
-            rec.normal = vec3(0.0f, 1.0f, 0.0f);
-            rec.hitType = 1;
-        }
-
-        // --- 材质与环境配置阶段 ---
-
-        // 【大魔改】情况 0: 纯数学“璀璨星空与耀眼太阳”环境箱！
-        if (rec.hitType == 0) {
+        if (!hitAllSpheres(currentRay, 1000.0f, rec)) {
+            // -------- 天空盒区域 --------
             vec3 unitDir = normalize(currentRay.direction);
             
-            // 基础大气渐变（极美的科幻深邃感）
-            vec3 skyGrad = vec3(0.02f, 0.04f, 0.1f) + (unitDir.y + 1.0f) * vec3(0.08f, 0.12f, 0.25f);
+            vec3 daySky = mix(vec3(0.6f, 0.8f, 1.0f), vec3(0.05f, 0.35f, 0.9f), max(unitDir.y, 0.0f));
+            vec3 sunsetSky = mix(vec3(0.9f, 0.3f, 0.1f), vec3(0.1f, 0.1f, 0.3f), max(unitDir.y, 0.0f));
+            vec3 nightSky = mix(vec3(0.02f, 0.02f, 0.05f), vec3(0.0f, 0.0f, 0.02f), max(unitDir.y, 0.0f));
             
-            // 魔法 1：凭空捏造一个超强物理太阳 (位于斜上方)
-            vec3 sunDir = normalize(vec3(1.0f, 1.5f, -1.0f));
-            float sunScore = max(dot(unitDir, sunDir), 0.0f);
-            // 太阳耀斑核
-            vec3 sunColor = vec3(1.5f, 1.2f, 0.9f) * pow(sunScore, 256.0f) * 15.0f; 
-            // 太阳周围的金色光晕
-            vec3 sunGlow = vec3(1.0f, 0.6f, 0.3f) * pow(sunScore, 16.0f) * 2.0f;
-            
-            // 魔法 2：用数学杂色凭空生成的漫天繁星
-            float starCheck = hash(floor(unitDir * 120.0f)); 
-            vec3 stars = vec3(0.0f);
-            if (starCheck > 0.98f && unitDir.y > 0.0f) {
-                stars = vec3(pow(hash(unitDir), 10.0f) * 4.0f);
+            vec3 skyColor = mix(daySky, sunsetSky, smoothstep(0.3f, -0.1f, sunDir.y));
+            skyColor = mix(skyColor, nightSky, isNight);
+
+            if (unitDir.y > 0.0f && isNight > 0.0f) {
+                float starNoise = hash12(unitDir.xz / (unitDir.y + 0.1f) * 800.0f);
+                if (starNoise > 0.996f) {
+                    skyColor += vec3(0.9f, 0.95f, 1.0f) * pow(sin(shaderTime * 2.0f + starNoise * 10.0f), 2.0f) * isNight;
+                }
             }
 
-            // 合成最终的纯数学环境光
-            finalColor += throughput * (skyGrad + sunColor + sunGlow + stars);
-            break; 
+            float sunSpot = max(dot(unitDir, sunDir), 0.0f);
+            vec3 sun = vec3(1.0f, 0.9f, 0.7f) * pow(sunSpot, 128.0f) * 3.0f * isDay;
+            
+            float moonSpot = max(dot(unitDir, moonDir), 0.0f);
+            vec3 moon = vec3(0.85f, 0.9f, 1.0f) * pow(moonSpot, 256.0f) * 1.5f * isNight;
+            skyColor += sun + moon;
+
+            // 高空物理云层渲染
+            if (unitDir.y > 0.0f) {
+                float cloudHeight = 20.0f;
+                vec3 skyCloudIntersect = camPos + unitDir * ((cloudHeight - camPos.y) / unitDir.y);
+                vec2 cloudUV = skyCloudIntersect.xz * 0.05f + vec2(shaderTime * 0.1f, 0.0f);
+                float cloudDensity = smoothstep(0.4f, 0.8f, fbm(cloudUV));
+                vec3 cloudColor = mix(vec3(0.95f, 0.96f, 0.98f), vec3(0.2f, 0.23f, 0.3f), isNight);
+                skyColor = mix(skyColor, cloudColor, cloudDensity * 0.85f * smoothstep(0.0f, 0.1f, unitDir.y));
+            }
+
+            finalColor += throughput * skyColor;
+            break;
         }
 
-        // 情况 1: 地面
-        if (rec.hitType == 1) {
-            // 1. 基础黑白棋盘格与太阳漫反射
-            vec3 sunDir = normalize(vec3(1.0f, 1.5f, -1.0f));
-            vec3 floorColor = (sin(rec.p.x * 1.5f) * sin(rec.p.z * 1.5f) > 0.0f) ? vec3(0.7f) : vec3(0.0f);
-            float diffuse = max(dot(rec.normal, sunDir), 0.15f);
-            
-            // 2. 【核心焦散魔法】：凭空在玻璃球下方捏造聚光斑！
-            // 计算从 1号玻璃球(BALL_A_POS) 顺着太阳光投射到地面上的“影子中心点”
-            // 玻璃球中心 y 是 0.0，地面 y 是 -2.0，高度差是 2.0
-            float heightDiff = BALL_A_POS.y - rec.p.y; 
-            vec3 shadowCenter = BALL_A_POS - sunDir * (heightDiff / sunDir.y);
-            
-            // 算出当前地面碰撞点 `rec.p` 距离影子中心的距离
-            // 因为玻璃球会把光线像凸透镜一样“向内聚焦”，所以焦点会比影子中心更靠近球体正下方一点点
-            vec3 focusCenter = shadowCenter + sunDir * 0.4f; // 向球体下方微调
-            float distToFocus = distance(vec3(rec.p.x, 0.0f, rec.p.z), vec3(focusCenter.x, 0.0f, focusCenter.z));
-            
-            // 用一个非常亮且紧凑的指数函数，画出汇聚的光斑
-            // 这里的 0.4f 控制光斑的大小，数值越小光斑越锐利
-            float causticIntensity = exp(-distToFocus * distToFocus / (0.15f)); 
-            
-            // 加上美丽的樱花粉色边缘焦散（因为光线穿过粉色玻璃会染色）
-            vec3 causticColor = vec3(1.5f, 0.6f, 0.8f) * causticIntensity * 3.5f; 
+        vec3 activeLightDir = (sunDir.y > 0.0f) ? sunDir : moonDir;
+        float lightIntensity = (sunDir.y > 0.0f) ? 1.0f : 0.2f;
 
-            // 3. 把焦散和原本的地面颜色融合
-            finalColor += throughput * (floorColor * diffuse + causticColor);
+        // 情况 1: 黑白棋盘格地面（双重阴影融合！）
+        if (rec.hitType == 1) {
+            vec3 floorColor = (sin(rec.p.x * 1.5f) * sin(rec.p.z * 1.5f) > 0.0f) ? vec3(0.7f) : vec3(0.0f);
+            float diffuse = max(dot(rec.normal, activeLightDir), 0.1f) * lightIntensity;
             
-            // 地面微弱反射继续前行
+            // ─── 【调用分开写的两套阴影魔法】 ───
+            float cloudShadowFactor = getCloudShadow(rec.p, activeLightDir, shaderTime); // 2D云影
+            float objectShadowFactor = getSphereShadow(rec.p, activeLightDir);           // 3D物体影
+            
+            // 相互融合叠加到漫反射上
+            diffuse *= (cloudShadowFactor * objectShadowFactor);
+
+            // 动态光追拟合焦散（受阴影遮挡影响）
+            vec3 toBall = rec.p - BALL_A_POS;
+            float tOnAxis = dot(-toBall, sunDir);
+            vec3 closestPointOnAxis = rec.p + sunDir * tOnAxis;
+            float distToAxis = distance(closestPointOnAxis, BALL_A_POS);
+            float idealDist = 0.43f * (tOnAxis - 0.5f); 
+            float d = abs(distToAxis - idealDist);
+            float realCausticIntensity = 0.0f;
+            
+            if (tOnAxis > 0.0f && sunDir.y > 0.05f) {
+                realCausticIntensity += exp(-d * d / 0.004f) * 6.5f / (distToAxis + 0.1f);
+                if (distToAxis < idealDist) {
+                    realCausticIntensity += pow(1.0f - (distToAxis / idealDist), 2.0f) * 1.5f;
+                }
+                realCausticIntensity *= smoothstep(0.05f, 0.2f, sunDir.y) * cloudShadowFactor; 
+            }
+            vec3 realCausticColor = vec3(2.5f, 0.5f, 0.8f) * realCausticIntensity;
+
+            finalColor += throughput * (floorColor * diffuse + realCausticColor);
+            
+            // 镜面反射也附带云层和遮挡的衰减
             currentRay.origin = rec.p + rec.normal * 0.001f;
             currentRay.direction = reflect(normalize(currentRay.direction), rec.normal);
-            throughput *= 0.15f; 
+            throughput *= 0.15f * cloudShadowFactor * objectShadowFactor; 
         }
 
-        // 情况 2: 樱花粉玻璃球 (因为有了强大的太阳光，这里会折射出绝美的高光轮廓！)
+        // 情况 2: 樱花粉玻璃球
         if (rec.hitType == 2) {
-            float etaiOverEtat = rec.frontFace ? (IOR_AIR / IOR_GLASS) : (IOR_GLASS / IOR_AIR);
+            float etaiOverEtat = rec.frontFace ? (1.0f / 1.52f) : (1.52f / 1.0f);
             vec3 unitDirection = normalize(currentRay.direction);
             float cosTheta = min(dot(-unitDirection, rec.normal), 1.0f);
             float sinTheta = sqrt(1.0f - cosTheta * cosTheta);
-
             bool cannotRefract = etaiOverEtat * sinTheta > 1.0f;
-            // 算出这一点的精确反射概率
             float reflectProb = schlickFresnel(cosTheta, etaiOverEtat);
-
-            if (rec.frontFace) {
-                // 玻璃边缘美丽的积光效果
-                finalColor += throughput * vec3(0.5f, 0.7f, 1.0f) * pow(1.0f - cosTheta, 4.0f) * 0.5f;
-            }
 
             vec3 reflectDir = reflect(unitDirection, rec.normal);
             vec3 refractDir = refract(unitDirection, rec.normal, etaiOverEtat);
@@ -212,60 +284,39 @@ vec3 rayColor(Ray initialRay) {
                 currentRay.origin = rec.p + rec.normal * 0.001f;
                 currentRay.direction = reflectDir;
             } else {
-                // 【无噪点核心】：彻底放弃随机数二选一！
-                // 我们直接分流：一部分光能量走反射，剩下的走折射。这就是物理上的能量守恒！
-                
-                // 1. 顺便计算一下反射光撞击到太阳的高光斑点（给玻璃表面增加一层物理质感）
-                vec3 sunDir = normalize(vec3(1.0f, 1.5f, -1.0f));
-                float spec = pow(max(dot(reflectDir, sunDir), 0.0f), 32.0f);
-                finalColor += throughput * vec3(1.0f) * spec * reflectProb * 2.0f;
+                float spec = pow(max(dot(reflectDir, activeLightDir), 0.0f), 32.0f);
+                finalColor += throughput * vec3(1.0f) * spec * reflectProb * 2.0f * lightIntensity;
 
-                // 2. 让光线继续往玻璃内部折射穿透
                 currentRay.origin = rec.p - rec.normal * 0.001f;
                 currentRay.direction = refractDir;
-                
-                // 能量根据折射率衰减，并染上绝美的樱花粉
                 throughput *= (1.0f - reflectProb) * vec3(1.0f, 0.45f, 0.65f); 
             }
         }
 
-        // 【完全无噪净化版】情况 3: 丝滑缎面黄金金属球
+        // 情况 3: 缎面黄金金属球
         if (rec.hitType == 3) {
-            // 物理防漏魔法：如果光线是从球体内部撞击内壁(frontFace为false)，直接判定为无效，不着色！
-            if (!rec.frontFace) {
-                break; 
-            }
+            if (!rec.frontFace) break; 
+            vec3 reflectDir = reflect(normalize(currentRay.direction), rec.normal);
+            float fuzzySpec = pow(max(dot(reflectDir, activeLightDir), 0.0f), 12.0f);
+            finalColor += throughput * vec3(1.0f, 0.85f, 0.5f) * fuzzySpec * 1.5f * lightIntensity; 
 
-            vec3 sunDir = normalize(vec3(1.0f, 1.5f, -1.0f));
-            vec3 perfectReflect = reflect(normalize(currentRay.direction), rec.normal);
-            
-            // 真正的表面拉丝缎面效果
-            vec3 satinReflect = normalize(mix(perfectReflect, rec.normal, 0.12f)); 
-            float surfaceSpec = pow(max(dot(satinReflect, sunDir), 0.2f), 12.0f);
-            
-            // 把高光直接狠狠地焊在正表面上
-            finalColor += throughput * vec3(1.0f, 0.85f, 0.5f) * surfaceSpec * 1.5f; 
-
-            // 光线在【外部】继续反弹
             currentRay.origin = rec.p + rec.normal * 0.001f; 
-            currentRay.direction = satinReflect;
-            
-            // 黄金颜色吸收
+            currentRay.direction = reflectDir;
             throughput *= vec3(1.0f, 0.85f, 0.45f);
-            
         }
 
         // 情况 4: 翡翠绿塑料球
         if (rec.hitType == 4) {
-            vec3 sunDir = normalize(vec3(1.0f, 1.5f, -1.0f));
-            float diffuse = max(dot(rec.normal, sunDir), 0.1f);
-            vec3 plasticColor = vec3(0.05f, 0.65f, 0.25f) * diffuse;
+            if (!rec.frontFace) break;
+            float diffuse = max(dot(rec.normal, activeLightDir), 0.1f) * lightIntensity;
+            vec3 reflectDir = reflect(normalize(currentRay.direction), rec.normal);
+            float spec = pow(max(dot(reflectDir, activeLightDir), 0.0f), 16.0f) * 0.5f * lightIntensity;
             
-            vec3 viewDir = normalize(-currentRay.direction);
-            vec3 halfDir = normalize(sunDir + viewDir);
-            float spec = pow(max(dot(rec.normal, halfDir), 0.0f), 32.0f) * 0.6f;
-            
-            finalColor += throughput * (plasticColor + vec3(spec));
+            // 塑料球本身也可以接收高空云影哦！
+            float cloudShadowFactor = getCloudShadow(rec.p, activeLightDir, shaderTime);
+            diffuse *= cloudShadowFactor;
+
+            finalColor += throughput * (vec3(0.1f, 0.7f, 0.3f) * diffuse + vec3(1.0f) * spec);
             break; 
         }
     }
@@ -282,9 +333,8 @@ void main() {
     primaryRay.origin = camPos;
     primaryRay.direction = rayDirection;
 
-    vec3 pixelColor = rayColor(primaryRay);
+    vec3 pixelColor = rayColor(primaryRay, time); 
     
-    // 增加一点简单的 HDR 曝光映射和伽马校正，让太阳的高光更柔和漂亮
     pixelColor = pixelColor / (pixelColor + vec3(1.0f));
     FragColor = vec4(pow(pixelColor, vec3(1.0f / 2.2f)), 1.0f);
 }
