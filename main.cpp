@@ -8,7 +8,7 @@
 #include <string>
 
 // --- 空间与摄像机状态 ---
-glm::vec3 cameraPos = glm::vec3(0.0f, 0.0f, 0.0f);
+glm::vec3 cameraPos = glm::vec3(0.0f, 1.7f, 0.0f);
 glm::vec3 cameraFront = glm::vec3(0.0f, 0.0f, -1.0f);
 glm::vec3 cameraUp = glm::vec3(0.0f, 1.0f, 0.0f);
 glm::vec3 cameraRight = glm::vec3(1.0f, 0.0f, 0.0f);
@@ -36,6 +36,9 @@ const float jumpForce = 6.0f;       // 配合重力提升了跳跃初速度
 float moveForce = 45.0f;      // 基础移动推力
 float friction = 8.0f;       // 地面滑动摩擦阻尼
 bool isGrounded = false;
+bool isSprinting = false;
+float currentEyeHeight = 1.7f;     // 每帧过渡中的当前眼睛高度
+bool fPressedLastFrame = false;
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height) {
     glViewport(0, 0, width, height);
@@ -78,17 +81,41 @@ void processInput(GLFWwindow* window) {
     if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
         glfwSetWindowShouldClose(window, true);
 
-    // 【净化魔法 1】：修复了冲刺时推力没有被应用到的 Bug 
-    float currentMoveForce = moveForce;
-    if (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) {
-        currentMoveForce = 110.0f; // 冲啊，梦子！全速前进！
-    }
-
-    // 提取水平运动方向
+    // ─── 1. 提取键盘水平移动状态 ───
     glm::vec3 forward = glm::normalize(glm::vec3(cameraFront.x, 0.0f, cameraFront.z));
     glm::vec3 right = cameraRight;
 
-    // 清空上一帧残留的水平加速度，完全由这一帧的键盘输入决定
+    bool hasMovementInput = (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) ||
+        (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) ||
+        (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) ||
+        (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS);
+
+    // ─── 2. 【核心】疾跑锁 (Sprint Lock) 逻辑 ───
+    static bool ctrlPressedLastFrame = false;
+    bool ctrlPressedThisFrame = (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS);
+
+    // 当刚按下 Ctrl 键时，触发/切换疾跑状态
+    if (ctrlPressedThisFrame && !ctrlPressedLastFrame) {
+        isSprinting = !isSprinting;
+    }
+    ctrlPressedLastFrame = ctrlPressedThisFrame;
+
+    // 自动解锁机制：如果梦子停下脚步不走了，或者按了潜行，就自动解除疾跑锁
+    if (!hasMovementInput || glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) {
+        isSprinting = false;
+    }
+
+    // ─── 3. 决定最终的移动推力 ───
+    float currentMoveForce = moveForce; // 默认基础推力 45.0f
+
+    if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) {
+        currentMoveForce = 15.0f;       // 潜行状态：悄咪咪摸过去，推力大大减小
+    }
+    else if (isSprinting) {
+        currentMoveForce = 110.0f;      // 疾跑锁状态：全速冲刺！
+    }
+
+    // 清空并重新根据键盘计算水平加速度
     cameraAcceleration.x = 0.0f;
     cameraAcceleration.z = 0.0f;
 
@@ -97,28 +124,28 @@ void processInput(GLFWwindow* window) {
     if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) cameraAcceleration -= right * currentMoveForce;
     if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) cameraAcceleration += right * currentMoveForce;
 
-    // 跳跃逻辑
+    // ─── 4. 跳跃逻辑 (跳跃时也会打断疾跑锁) ───
     static bool spacePressedLastFrame = false;
     bool spacePressedThisFrame = (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
 
     if (spacePressedThisFrame && !spacePressedLastFrame && isGrounded) {
-        cameraVelocity.y = jumpForce;
+        cameraVelocity.y = jumpForce; 
         isGrounded = false;
+        //isSprinting = false;           起跳时解除疾跑锁，更符合常规游戏手感
     }
     spacePressedLastFrame = spacePressedThisFrame;
 
-    // F11 全屏切换保持原样
+    // 全屏切换保持原样...
     static bool f11PressedLastFrame = false;
     bool f11PressedThisFrame = (glfwGetKey(window, GLFW_KEY_F11) == GLFW_PRESS);
-
     if (f11PressedThisFrame && !f11PressedLastFrame) {
         isFullscreen = !isFullscreen;
         if (isFullscreen) {
             glfwGetWindowPos(window, &windowedX, &windowedY);
-            glfwGetWindowSize(window, &windowedWidth, &windowedHeight);
-            GLFWmonitor* primaryMonitor = glfwGetPrimaryMonitor();
+            glfwGetWindowSize(window, &windowedWidth, &windowedHeight); 
+            GLFWmonitor* primaryMonitor = glfwGetPrimaryMonitor(); 
             const GLFWvidmode* mode = glfwGetVideoMode(primaryMonitor);
-            glfwSetWindowMonitor(window, primaryMonitor, 0, 0, mode->width, mode->height, mode->refreshRate);
+            glfwSetWindowMonitor(window, primaryMonitor, 0, 0, mode->width, mode->height, mode->refreshRate); 
         }
         else {
             glfwSetWindowMonitor(window, NULL, windowedX, windowedY, windowedWidth, windowedHeight, 0);
@@ -229,16 +256,22 @@ int main() {
         cameraPos += cameraVelocity * deltaTime;
 
         // 地面碰撞检测与限位
-        float eyeHeight = 1.7f;
-        float floorLevel = -2.0f;
-        float minCameraY = floorLevel + eyeHeight;
+        float targetEyeHeight = glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ? 1.0f : 1.7f;
+        // 使用指数衰减插值，0.1秒内就能丝滑到位
+        currentEyeHeight = glm::mix(currentEyeHeight, targetEyeHeight, 1.0f - glm::exp(-20.0f * deltaTime));
 
+        float floorLevel = 0.0f;
+        float minCameraY = floorLevel + currentEyeHeight;
+
+        // 地面限位
         if (cameraPos.y <= minCameraY) {
             cameraPos.y = minCameraY;
             cameraVelocity.y = 0.0f;
             isGrounded = true;
         }
         else {
+            // 如果玩家在空中松开Shift或者按Shift，也要允许Y轴坐标动态被身高牵引
+            if (isGrounded) cameraPos.y = minCameraY;
             isGrounded = false;
         }
 
